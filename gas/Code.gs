@@ -1,9 +1,9 @@
 /* 司法書士スマホ学習：サーバー側（Google Apps Script）
- * 元の「司法書士データベース」はコピーするときに読むだけで、書き込まない。
+ * 元のシート（Local.js の SOURCE_ID。GitHub には置かない）はコピーするときに読むだけで、書き込まない。
  * 読み書きするのは setup が作ったコピー（COPY_NAME）だけ。
  */
 var VER = '1.0.0';
-var SOURCE_NAME = '司法書士データベース';
+var REQUIRED_Q = ['ID', '問題', '答え', '科目', '大分類', '中分類', '小分類', '正解数', '誤答数', '正答率', 'レベル', '次回実施日', '最終実施日', 'ウォーク問', '要修正', '借金'];
 var COPY_NAME = '司法書士スマホ学習_データ';
 var Q_SHEET = 'T_mondai', H_SHEET = 'T_history', S_SHEET = '設定', LOG_SHEET = '同期記録';
 var EXTRA = ['更新時刻', '削除'];
@@ -16,15 +16,16 @@ function setup() {
   var have = props.getProperty('SHEET_ID');
   if (have) { Logger.log('作成済み: ' + SpreadsheetApp.openById(have).getUrl()); return; }
 
-  var it = DriveApp.getFilesByName(SOURCE_NAME), found = [];
-  while (it.hasNext()) {
-    var f = it.next();
-    if (!f.isTrashed() && f.getMimeType() === MimeType.GOOGLE_SHEETS) found.push(f);
-  }
-  if (found.length !== 1) throw new Error('「' + SOURCE_NAME + '」が ' + found.length + ' 件見つかりました。1 件のときだけコピーします。');
-  if (!SpreadsheetApp.openById(found[0].getId()).getSheetByName(Q_SHEET)) throw new Error(Q_SHEET + ' のシートがありません。');
+  if (typeof SOURCE_ID === 'undefined' || !SOURCE_ID) throw new Error('元のシートの指定（Local.js の SOURCE_ID）がありません。');
+  var src = SpreadsheetApp.openById(SOURCE_ID);
+  [[Q_SHEET, REQUIRED_Q], [H_SHEET, ['HistoryID', '問題ID', '実施日時', '結果']], [S_SHEET, ['学習']]].forEach(function (rule) {
+    var sh = src.getSheetByName(rule[0]);
+    if (!sh) throw new Error(rule[0] + ' のシートがありません。コピーを中止しました。');
+    var h = headers_(sh), lack = rule[1].filter(function (n) { return h.indexOf(n) < 0; });
+    if (lack.length) throw new Error(rule[0] + ' に列がありません：' + lack.join('、') + '。コピーを中止しました。');
+  });
 
-  var copy = found[0].makeCopy(COPY_NAME);
+  var copy = DriveApp.getFileById(SOURCE_ID).makeCopy(COPY_NAME);
   var ss = SpreadsheetApp.openById(copy.getId());
   var q = ss.getSheetByName(Q_SHEET);
   var head = headers_(q);
