@@ -1,13 +1,14 @@
 /* 司法書士スマホ学習：画面と出題・同期 */
 (function () {
   'use strict';
-  var APP_VERSION = '1.0.1';
+  var APP_VERSION = '1.1.0';
   var GAS_PAT = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/;
   var URL_KEY = 'sms.url', FS_KEY = 'sms.fs', RESUME_KEY = 'sms.resume';
   var PAGE = 500, LIST_STEP = 50;
 
   var db, metas = [], byId = new Map();
-  var settings = { subject: '', large: '', startId: 0, walk: 0, fix: 0, study: 0 };
+  var settings = { subject: '', large: '', startId: 0, walk: 0, fix: 0 }; // 絞り込みは端末ごと
+  var study = { own: 0, rest: 0 }, conflicts = [], deviceId = ''; // 学習回数 ＝ この端末 ＋ ほかの合計
   var S = { tab: 'home', view: 'home', mode: null, curId: null, revealed: false, trail: [], editId: null, editFrom: null,
     syncing: false, pending: 0, wantReload: false, list: { q: '', s: '', l: '', flag: '', shown: LIST_STEP, ids: [] } };
 
@@ -60,7 +61,7 @@
     });
   }
   function toMeta(r) {
-    return { id: r[0], s: r[3], l: r[4], m: r[5], n: r[6], c: r[7], w: r[8], lv: r[9], next: r[10], last: r[11], walk: r[12], fix: r[13], debt: r[14] };
+    return { id: r[0], s: r[3], l: r[4], m: r[5], n: r[6], c: r[7], w: r[8], lv: r[9], next: r[10], last: r[11], walk: r[12], fix: r[13], debt: r[14], tt: r[17] || 0 };
   }
   function applyRowsToMemory(rows) {
     rows.forEach(function (r) {
@@ -107,7 +108,7 @@
       return after.length ? after[0].id : null;
     }
     var others = pool.filter(function (m) { return m.id !== curId; });
-    var k = (settings.study || 0) % 5, hit;
+    var k = (study.own + study.rest) % 5, hit;
     if (k <= 2) {
       hit = best(others.filter(function (m) { return answered(m) === 0; }), function (a, b) { return a.id - b.id; });
       if (hit) return hit.id;
@@ -122,7 +123,8 @@
   function addDays(ms, n) { var d = new Date(ms); d.setDate(d.getDate() + n); return d.getTime(); }
 
   async function grade(ok) {
-    var m = byId.get(S.curId); if (!m) return;
+    var m = byId.get(S.curId);
+    if (!m) { toast('この問題は別の端末で消されました'); nextQuestion(); return; }
     var now = Date.now();
     if (ok) {
       m.next = addDays(startOfToday(), Math.pow(2, (m.lv || 0) + 1));
@@ -132,11 +134,11 @@
       m.lv = Math.max(0, (m.lv || 0) - 1); m.w = (m.w || 0) + 1; m.debt = (m.debt || 0) + 1;
     }
     m.last = now;
-    settings.study = (settings.study || 0) + 1;
+    study.own++;
     await saveMeta(m);
-    await kvSet('settings', settings);
-    await kvSet('settingsDirty', true);
-    await addOp('grade', m.id, { ok: ok, c: m.c, w: m.w, lv: m.lv, next: m.next, last: m.last, debt: m.debt });
+    await kvSet('study', study);
+    await kvSet('countDirty', true);
+    await addOp('grade', m.id, { ok: ok, at: now }); // 送るのは結果と時刻だけ。数値はサーバーが時刻順に計算する
     nextQuestion();
   }
   function nextQuestion() {
@@ -148,19 +150,21 @@
   }
 
   /* ---------- 画面 ---------- */
-  var TITLES = { home: 'ホーム', list: '問題', add: '問題を追加', settings: '設定', study: '学習', edit: '問題を修正' };
+  var TITLES = { home: 'ホーム', list: '問題', add: '問題を追加', settings: '設定', study: '学習', edit: '問題を修正', conflict: '修正がぶつかった問題' };
   function go(view) {
+    var sub = view === 'study' || view === 'edit' || view === 'conflict';
     S.view = view;
-    if (view !== 'study' && view !== 'edit') S.tab = view;
+    if (!sub) S.tab = view;
     $('title').textContent = TITLES[view] || '';
-    $('backBtn').hidden = !(view === 'study' || view === 'edit');
-    $('tabs').hidden = view === 'study' || view === 'edit';
+    $('backBtn').hidden = !sub;
+    $('tabs').hidden = sub;
     document.querySelectorAll('#tabs button').forEach(function (b) { b.classList.toggle('on', b.dataset.tab === S.tab); });
     main.scrollTop = 0;
     if (view === 'home') renderHome();
     else if (view === 'list') renderList();
     else if (view === 'add') renderEdit(null);
     else if (view === 'settings') renderSettings();
+    else if (view === 'conflict') renderConflict();
     if (S.wantReload && view !== 'edit' && view !== 'add') doReload();
   }
   function uniq(key, filter) {
@@ -187,6 +191,7 @@
     });
     var st = settings;
     main.innerHTML =
+      (conflicts.length ? '<div class="card"><h2>修正がぶつかった問題 ' + conflicts.length + ' 件</h2><p class="muted">別の端末でも同じ問題が直されています。どちらを残すか選んでください。</p><button class="btn primary" data-act="openConflict">確認する</button></div>' : '') +
       '<div class="card"><div class="stats">' +
       '<div class="stat"><b>' + todayN.toLocaleString() + '</b><span>今日の回答</span></div>' +
       '<div class="stat"><b>' + due.toLocaleString() + '</b><span>復習の時期</span></div>' +
@@ -303,10 +308,17 @@
       var low = await kvGet('tempId') || 0; id = low - 1; await kvSet('tempId', id);
       m = { id: id, c: 0, w: 0, lv: 0, next: Date.now(), last: null, debt: 0 };
       metas.push(m); byId.set(id, m);
-    } else m = byId.get(id);
+    } else {
+      m = byId.get(id);
+      if (!m) { // 直している間に別の端末で消された。入力は捨てず、サーバーの確認に回す
+        m = { id: id, c: 0, w: 0, lv: 0, next: Date.now(), last: null, debt: 0, tt: 0 };
+        metas.push(m); byId.set(id, m); metas.sort(function (a, b) { return a.id - b.id; });
+      }
+    }
     Object.assign(m, { s: d.s, l: d.l, m: d.m, n: d.n, walk: d.walk, fix: d.fix });
     await saveMeta(m);
     await req('text', 'readwrite', function (s) { return s.put({ id: id, q: d.q, a: d.a }); });
+    d.baseTs = m.tt || 0; // どの版をもとに直したか
     await addOp('save', id, d);
     toast('保存しました');
     if (S.editFrom === 'study') { S.view = 'study'; $('title').textContent = TITLES.study; showQuestion(id); }
@@ -317,12 +329,42 @@
   async function deleteCurrent() {
     var id = S.editId; if (id == null || !confirm('ID ' + id + ' を消しますか？')) return;
     var m = byId.get(id);
-    metas.splice(metas.indexOf(m), 1); byId.delete(id);
+    if (m) { metas.splice(metas.indexOf(m), 1); byId.delete(id); }
     await req('meta', 'readwrite', function (s) { return s.delete(id); });
     await req('text', 'readwrite', function (s) { return s.delete(id); });
     await addOp('delete', id, {});
     toast('消しました');
     if (S.editFrom === 'study') { S.view = 'study'; S.curId = id; nextQuestion(); } else go('list');
+  }
+
+  /* ---------- 修正がぶつかったとき ---------- */
+  function diffBlock(title, d) {
+    var cat = [d.s, d.l, d.m, d.n].filter(Boolean).map(esc).join(' › ');
+    return '<div class="card"><h2>' + title + '</h2><div class="qMeta">' + cat + '</div><div class="qText">' + esc(d.q) + '</div>' +
+      '<div class="aBox"><h3>答え</h3><div class="aText">' + esc(d.a) + '</div></div></div>';
+  }
+  function renderConflict() {
+    var c = conflicts[0];
+    if (!c) { go('home'); return; }
+    main.innerHTML = '<p class="muted">ID ' + c.id + ' ・ 残り ' + conflicts.length + ' 件</p>' +
+      diffBlock('この端末の修正', c.mine) +
+      (c.theirs ? diffBlock('別の端末の内容（今のデータ）', c.theirs) : '<div class="card"><h2>別の端末で消されています</h2></div>') +
+      '<div class="card stack"><button class="btn primary" data-act="keepMine">' + (c.theirs ? 'この端末の修正を残す' : 'この修正で問題を戻す') + '</button>' +
+      '<button class="btn" data-act="keepTheirs">' + (c.theirs ? '別の端末の内容を残す' : '消したままにする') + '</button></div>';
+    main.scrollTop = 0;
+  }
+  async function handleConflict(op, res) {
+    conflicts = conflicts.filter(function (x) { return x.id !== res.id; });
+    conflicts.push({ id: res.id, mine: op.data, theirs: res.theirs, ts: res.ts });
+    await kvSet('conflicts', conflicts);
+    if (res.row) { await putRows([res.row]); applyRowsToMemory([res.row]); }
+    toast('修正がぶつかった問題があります。ホームで選べます', 3500);
+  }
+  async function resolveConflict(keepMine) {
+    var c = conflicts.shift(); if (!c) return;
+    await kvSet('conflicts', conflicts);
+    if (keepMine) await addOp('save', c.id, Object.assign({}, c.mine, { baseTs: c.ts, restore: c.theirs ? 0 : 1 }));
+    if (conflicts.length) renderConflict(); else go('home');
   }
 
   function renderSettings() {
@@ -344,8 +386,11 @@
     var j = await r.json(); if (!j.ok) throw new Error(j.error || '読み込めません'); return j;
   }
   async function apiPost(body) {
+    body.device = deviceId;
     var r = await fetch(gasUrl(), { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body), redirect: 'follow' });
-    var j = await r.json(); if (!j.ok) throw new Error(j.error || '送れません'); return j;
+    var j = await r.json();
+    if (!j.ok) { var err = new Error(j.error || '送れません'); err.busy = !!j.busy; throw err; }
+    return j;
   }
   async function download(force) {
     var st = (!force && await kvGet('dl')) || { next: 0, rev: null };
@@ -367,13 +412,18 @@
     }
     await kvSet('rev', st.rev); await kvSet('loaded', true);
     await req('kv', 'readwrite', function (s) { return s.delete('dl'); });
-    var server = await api({ action: 'settings' });
-    settings = Object.assign(settings, server.settings); await kvSet('settings', settings);
+    var server = await api({ action: 'settings', device: deviceId });
+    study.rest = server.settings.rest || 0; await kvSet('study', study);
+    if (!(await kvGet('settings'))) { // 絞り込みは、この端末で初めてのときだけ元の設定を使う
+      var ss = server.settings;
+      settings = { subject: ss.subject, large: ss.large, startId: ss.startId, walk: ss.walk, fix: ss.fix };
+      await kvSet('settings', settings);
+    }
   }
   async function pushOps() {
-    if (await kvGet('settingsDirty')) {
-      await req('ops', 'readwrite', function (s) { return s.add({ opId: uid(), type: 'settings', id: 0, data: settings }); });
-      await kvSet('settingsDirty', false);
+    if (await kvGet('countDirty')) {
+      await req('ops', 'readwrite', function (s) { return s.add({ opId: uid(), type: 'count', id: 0, data: { own: study.own } }); });
+      await kvSet('countDirty', false);
     }
     for (;;) {
       var ops = await req('ops', 'readonly', function (s) { return s.getAll(null, 20); });
@@ -385,6 +435,11 @@
         var res = j.results[i], op = ops[i];
         if (!res.ok) { failed = res.error; break; }
         if (op.id < 0 && res.id > 0) await remap(op.id, res.id);
+        if (res.conflict) await handleConflict(op, res);
+        else if (op.type === 'save') {
+          var sm = byId.get(res.id);
+          if (sm) { sm.tt = res.ts; await saveMeta(sm); }
+        }
         await req('ops', 'readwrite', function (s) { return s.delete(op.seq); });
         advanced++;
       }
@@ -411,7 +466,8 @@
   async function pullChanges() {
     var rev = await kvGet('rev') || 0;
     for (;;) {
-      var j = await api({ action: 'changes', since: rev });
+      var j = await api({ action: 'changes', since: rev, device: deviceId });
+      if (j.rest != null && j.rest !== study.rest) { study.rest = j.rest; await kvSet('study', study); }
       var waiting = new Set((await req('ops', 'readonly', function (s) { return s.getAll(); })).map(function (o) { return o.id; }));
       var rows = j.rows.filter(function (r) { return !waiting.has(r[0]); });
       if (rows.length) { await putRows(rows); applyRowsToMemory(rows); }
@@ -430,10 +486,16 @@
       else await pullChanges();
       S.pending = await req('ops', 'readonly', function (s) { return s.count(); });
       if (manual) toast('同期しました');
+      if (S.view === 'study' && S.curId != null && !byId.has(S.curId)) {
+        toast('この問題は別の端末で消されました'); nextQuestion();
+      }
       if (S.view === 'home') renderHome();
       if (S.view === 'settings' && force) renderSettings();
     } catch (e) {
-      toast('同期できません：' + (e.message || e), 4000);
+      if (e.busy) { // 別の端末が送信中。少し待って自動で送り直す
+        if (manual) toast('混み合っています。少しあとで送ります');
+        setTimeout(function () { sync(false); }, 4000 + Math.random() * 6000);
+      } else toast('同期できません：' + (e.message || e), 4000);
     } finally {
       S.syncing = false; paintSync();
     }
@@ -447,7 +509,7 @@
     if (g('fLarge')) settings.large = g('fLarge').value;
     if (g('fixOnly')) settings.fix = g('fixOnly').checked ? 1 : 0;
     if (g('startId')) settings.startId = Number(g('startId').value) || 0;
-    kvSet('settings', settings); kvSet('settingsDirty', true);
+    kvSet('settings', settings);
   }
   var actions = {
     goSettings: function () { go('settings'); },
@@ -460,11 +522,21 @@
     reveal: reveal,
     grade: function (el) { grade(el.dataset.ok === '1'); },
     skip: nextQuestion,
-    prev: function () { var id = S.trail.pop(); if (id != null) showQuestion(id); },
-    flag: async function (el) {
-      var m = byId.get(S.curId), f = el.dataset.f; m[f] = m[f] ? 0 : 1; el.classList.toggle('on', !!m[f]);
-      await saveMeta(m); await addOp('flag', m.id, { walk: m.walk, fix: m.fix });
+    prev: function () {
+      var id;
+      while ((id = S.trail.pop()) != null) if (byId.has(id)) { showQuestion(id); return; }
+      toast('前の問題はありません');
     },
+    flag: async function (el) {
+      var m = byId.get(S.curId), f = el.dataset.f;
+      if (!m) { toast('この問題は別の端末で消されました'); nextQuestion(); return; }
+      m[f] = m[f] ? 0 : 1; el.classList.toggle('on', !!m[f]);
+      var one = {}; one[f] = m[f]; // 押した印だけ送る
+      await saveMeta(m); await addOp('flag', m.id, one);
+    },
+    openConflict: function () { go('conflict'); },
+    keepMine: function () { resolveConflict(true); },
+    keepTheirs: function () { resolveConflict(false); },
     edit: function () { S.editFrom = 'study'; S.view = 'edit'; $('title').textContent = TITLES.edit; renderEdit(S.curId); main.scrollTop = 0; },
     search: function () { var f = S.list; f.q = $('lq').value; f.s = $('ls').value; f.l = $('ll').value; f.flag = $('lflag').value; runList(); },
     more: function () { S.list.shown += LIST_STEP; paintList(); },
@@ -548,7 +620,12 @@
     metas = await req('meta', 'readonly', function (s) { return s.getAll(); }) || [];
     metas.sort(function (a, b) { return a.id - b.id; });
     byId = new Map(metas.map(function (m) { return [m.id, m]; }));
-    settings = Object.assign(settings, await kvGet('settings') || {});
+    var savedSettings = await kvGet('settings') || {};
+    settings = Object.assign(settings, savedSettings);
+    study = await kvGet('study') || { own: 0, rest: Number(savedSettings.study) || 0 }; // 1.0 の回数はほかの合計へ
+    conflicts = await kvGet('conflicts') || [];
+    deviceId = await kvGet('device');
+    if (!deviceId) { deviceId = 'd' + uid(); await kvSet('device', deviceId); }
     S.pending = await req('ops', 'readonly', function (s) { return s.count(); });
     paintSync();
     if (importFromQr()) {
