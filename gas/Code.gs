@@ -5,7 +5,7 @@
  * 複数端末の同期：○×は「いつ・どちらだったか」を問題ごとに積み、時刻順に計算し直す。
  * どの端末から、どの順番で届いても同じ結果になる。
  */
-var VER = '1.1.0';
+var VER = '1.1.1';
 var REQUIRED_Q = ['ID', '問題', '答え', '科目', '大分類', '中分類', '小分類', '正解数', '誤答数', '正答率', 'レベル', '次回実施日', '最終実施日', 'ウォーク問', '要修正', '借金'];
 var COPY_NAME = '司法書士スマホ学習_データ';
 var Q_SHEET = 'T_mondai', H_SHEET = 'T_history', S_SHEET = '設定', LOG_SHEET = '同期記録', DEVICE_SHEET = '端末';
@@ -93,7 +93,26 @@ function ms_(v) {
   var t = new Date(v).getTime(); // 日付が文字で入っている行にも対応
   return isFinite(t) ? t : null;
 }
-function num_(v) { var n = Number(v); return isFinite(n) ? n : 0; }
+function num_(v) {
+  // 数値の列に日付の書式が付いていると Date で届くので、元の数値（日数）に戻す
+  if (v instanceof Date) return isFinite(v.getTime()) ? Math.round((v.getTime() - new Date(1899, 11, 30).getTime()) / 86400000) : 0;
+  var n = Number(v);
+  return isFinite(n) ? n : 0;
+}
+/* 数値・記録の列の書式を一度だけそろえる（元のシートに日付の書式が混ざっているため） */
+function ensureFormats_(q, head, log) {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('FORMAT_V2')) return;
+  var c = colMap_(head), rows = q.getMaxRows() - 1;
+  ['更新時刻', '本文時刻', '正解数', '誤答数', 'レベル', '借金'].forEach(function (n) {
+    q.getRange(2, c[n] + 1, rows, 1).setNumberFormat('0');
+  });
+  ['本文端末', '同期履歴'].forEach(function (n) { q.getRange(2, c[n] + 1, rows, 1).setNumberFormat('@'); });
+  var logRows = log.getMaxRows() - 1;
+  log.getRange(2, 1, logRows, 1).setNumberFormat('@');
+  log.getRange(2, 2, logRows, 2).setNumberFormat('0');
+  props.setProperty('FORMAT_V2', '1');
+}
 function bool_(v) { return v === true || String(v).toUpperCase() === 'TRUE' || v === 'Y'; }
 function str_(v) { return String(v == null ? '' : v); }
 
@@ -249,6 +268,7 @@ function push_(ops, device) {
     var ss = book_();
     var q = ss.getSheetByName(Q_SHEET), hs = ss.getSheetByName(H_SHEET), log = ss.getSheetByName(LOG_SHEET);
     var head = ensureColumns_(q), c = colMap_(head);
+    ensureFormats_(q, head, log);
     var hHead = headers_(hs);
     var last = q.getLastRow();
     var idVals = last > 1 ? q.getRange(2, c['ID'] + 1, last - 1, 1).getValues() : [];
