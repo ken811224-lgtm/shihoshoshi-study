@@ -1,7 +1,7 @@
 /* 司法書士スマホ学習：画面と出題・同期 */
 (function () {
   'use strict';
-  var APP_VERSION = '1.1.3';
+  var APP_VERSION = '1.2.0';
   var GAS_PAT = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/;
   var URL_KEY = 'sms.url', FS_KEY = 'sms.fs', RESUME_KEY = 'sms.resume';
   var PAGE = 500, LIST_STEP = 50;
@@ -9,6 +9,7 @@
   var db, metas = [], byId = new Map();
   var settings = { subject: '', large: '', startId: 0, walk: 0, fix: 0 }; // 絞り込みは端末ごと
   var study = { own: 0, rest: 0 }, conflicts = [], deviceId = ''; // 学習回数 ＝ この端末 ＋ ほかの合計
+  var daily = {}, needDaily = true; // 日ごとの回答数（鍵は 20261121 の形）
   var S = { tab: 'home', view: 'home', mode: null, curId: null, revealed: false, trail: [], editId: null, editFrom: null,
     syncing: false, pending: 0, wantReload: false, list: { q: '', s: '', l: '', flag: '', shown: LIST_STEP, ids: [] } };
 
@@ -136,6 +137,8 @@
     }
     m.last = now;
     study.own++;
+    var dk = dayKey(now); daily[dk] = (daily[dk] || 0) + 1;
+    await kvSet('daily', daily);
     await saveMeta(m);
     await kvSet('study', study);
     await kvSet('countDirty', true);
@@ -209,13 +212,57 @@
       '<button class="btn" data-act="start" data-mode="id">この ID から学習</button></div>';
   }
 
+  /* ---------- 解いた数の記録（週は月曜はじまり） ---------- */
+  function dayKey(ms) { var d = new Date(ms); return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); }
+  function weekKeyOf(y, m, d) {
+    var x = new Date(y, m - 1, d);
+    x.setDate(x.getDate() - (x.getDay() + 6) % 7);
+    return dayKey(x.getTime());
+  }
+  function scoreStats() {
+    var now = new Date(), today = dayKey(now.getTime());
+    var thisWeek = weekKeyOf(now.getFullYear(), now.getMonth() + 1, now.getDate());
+    var thisMonth = Math.floor(today / 100), weeks = {}, months = {}, bestDay = 0;
+    Object.keys(daily).forEach(function (k) {
+      var key = Number(k), n = daily[k], y = Math.floor(key / 10000), m = Math.floor(key / 100) % 100, d = key % 100;
+      if (n > bestDay) bestDay = n;
+      var w = weekKeyOf(y, m, d), mo = Math.floor(key / 100);
+      weeks[w] = (weeks[w] || 0) + n;
+      months[mo] = (months[mo] || 0) + n;
+    });
+    var max = function (o) { return Object.keys(o).reduce(function (a, k) { return Math.max(a, o[k]); }, 0); };
+    var total = 0;
+    for (var i = 0; i < metas.length; i++) total += answered(metas[i]);
+    return { today: daily[today] || 0, week: weeks[thisWeek] || 0, month: months[thisMonth] || 0, total: total,
+      bestDay: bestDay, bestWeek: max(weeks), bestMonth: max(months) };
+  }
+  function scoreHtml() {
+    var s = scoreStats(), cell = function (label, v, sub) {
+      return '<div><span>' + label + '</span><b>' + v.toLocaleString() + '</b><small>' + sub + '</small></div>';
+    };
+    return cell('今日', s.today, '最高 ' + s.bestDay.toLocaleString()) + cell('今週', s.week, '最高 ' + s.bestWeek.toLocaleString()) +
+      cell('今月', s.month, '最高 ' + s.bestMonth.toLocaleString()) + cell('累計', s.total, '全期間');
+  }
+  async function refreshDaily() {
+    var j = await api({ action: 'daily' }), merged = j.daily || {};
+    var ops = await req('ops', 'readonly', function (s) { return s.getAll(); });
+    ops.forEach(function (o) { // まだ送っていない回答も足す
+      if (o.type !== 'grade') return;
+      var k = dayKey(o.data.at || o.data.last);
+      merged[k] = (merged[k] || 0) + 1;
+    });
+    daily = merged; needDaily = false;
+    await kvSet('daily', daily);
+    var box = $('score'); if (box) box.innerHTML = scoreHtml();
+  }
+
   async function showQuestion(id) {
     var m = byId.get(id); if (!m) return;
     var t = await getText(id) || { q: '', a: '' };
     S.curId = id; S.revealed = false;
     if (S.view !== 'study') { S.view = 'study'; $('title').textContent = TITLES.study; $('backBtn').hidden = false; $('tabs').hidden = true; }
     var cat = [m.s, m.l, m.m, m.n].filter(Boolean).map(esc).join(' › ');
-    main.innerHTML = '<div class="study">' +
+    main.innerHTML = '<div class="study"><div class="score" id="score">' + scoreHtml() + '</div>' +
       '<div class="qMeta">ID ' + m.id + ' ・ レベル ' + (m.lv || 0) + ' ・ ○' + (m.c || 0) + ' ×' + (m.w || 0) + ' ・ 借金 ' + (m.debt || 0) + '<br>' + cat + '</div>' +
       '<div class="tools"><button data-act="prev"' + (S.trail.length ? '' : ' disabled') + '>前へ</button><button data-act="skip">スキップ</button>' +
       '<button data-act="flag" data-f="walk" class="' + (m.walk ? 'on' : '') + '">ウォーク</button><button data-act="flag" data-f="fix" class="' + (m.fix ? 'on' : '') + '">要修正</button><button data-act="edit">修正</button></div>' +
@@ -394,7 +441,7 @@
     return j;
   }
   async function download(force) {
-    var st = (!force && await kvGet('dl')) || { next: 0, rev: null };
+    var st = (!force && await kvGet('dl')) || { next: 0, rev: null }, dv = null;
     if (force) {
       await req('meta', 'readwrite', function (s) { return s.clear(); });
       await req('text', 'readwrite', function (s) { return s.clear(); });
@@ -403,6 +450,7 @@
     for (;;) {
       var j = await api({ action: 'rows', offset: st.next, limit: PAGE });
       if (st.rev == null) st.rev = j.rev;
+      dv = j.dv || dv;
       if (j.next == null) break;
       await putRows(j.rows); applyRowsToMemory(j.rows);
       st.next = j.next; await kvSet('dl', st);
@@ -412,6 +460,7 @@
       if (st.next >= j.total) break;
     }
     await kvSet('rev', st.rev); await kvSet('loaded', true);
+    if (dv) await kvSet('dv', dv);
     await req('kv', 'readwrite', function (s) { return s.delete('dl'); });
     var server = await api({ action: 'settings', device: deviceId });
     study.rest = server.settings.rest || 0; await kvSet('study', study);
@@ -469,6 +518,7 @@
     for (;;) {
       var j = await api({ action: 'changes', since: rev, device: deviceId });
       if (j.rest != null && j.rest !== study.rest) { study.rest = j.rest; await kvSet('study', study); }
+      if (j.dv && j.dv !== await kvGet('dv')) return true; // データの読み方が変わったので全件を読み直す
       var waiting = new Set((await req('ops', 'readonly', function (s) { return s.getAll(); })).map(function (o) { return o.id; }));
       var rows = j.rows.filter(function (r) { return !waiting.has(r[0]); });
       if (rows.length) { await putRows(rows); applyRowsToMemory(rows); }
@@ -484,7 +534,9 @@
     try {
       await pushOps();
       if (force || !(await kvGet('loaded'))) await download(force);
-      else await pullChanges();
+      else if (await pullChanges()) await download(false); // 学習を止めないよう、消さずに上から読み直す
+      if (manual) needDaily = true;
+      if (needDaily) { try { await refreshDaily(); } catch (e) { /* 記録の表示だけなので同期は止めない */ } }
       S.pending = await req('ops', 'readonly', function (s) { return s.count(); });
       if (manual) toast('同期しました');
       if (S.view === 'study' && S.curId != null && !byId.has(S.curId)) {
@@ -628,7 +680,7 @@
     });
     navigator.serviceWorker.register('sw.js').then(function (r) { swReg = r; checkUpdate(); }).catch(function () {});
     document.addEventListener('visibilitychange', function () {
-      if (document.visibilityState === 'visible') { checkUpdate(); sync(false); }
+      if (document.visibilityState === 'visible') { needDaily = true; checkUpdate(); sync(false); }
     });
   }
 
@@ -657,6 +709,7 @@
     settings = Object.assign(settings, savedSettings);
     study = await kvGet('study') || { own: 0, rest: Number(savedSettings.study) || 0 }; // 1.0 の回数はほかの合計へ
     conflicts = await kvGet('conflicts') || [];
+    daily = await kvGet('daily') || {};
     deviceId = await kvGet('device');
     if (!deviceId) { deviceId = 'd' + uid(); await kvSet('device', deviceId); }
     S.pending = await req('ops', 'readonly', function (s) { return s.count(); });

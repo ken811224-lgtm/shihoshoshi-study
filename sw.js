@@ -1,5 +1,5 @@
 /* 画面の部品を端末にしまう。版を上げたら CACHE も app.js の APP_VERSION と同じ番号にする */
-var CACHE = 'sms-v1.1.3';
+var CACHE = 'sms-v1.2.0';
 var FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.json',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 

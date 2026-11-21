@@ -5,7 +5,7 @@
  * 複数端末の同期：○×は「いつ・どちらだったか」を問題ごとに積み、時刻順に計算し直す。
  * どの端末から、どの順番で届いても同じ結果になる。
  */
-var VER = '1.1.2';
+var VER = '1.2.0';
 var REQUIRED_Q = ['ID', '問題', '答え', '科目', '大分類', '中分類', '小分類', '正解数', '誤答数', '正答率', 'レベル', '次回実施日', '最終実施日', 'ウォーク問', '要修正', '借金'];
 var COPY_NAME = '司法書士スマホ学習_データ';
 var Q_SHEET = 'T_mondai', H_SHEET = 'T_history', S_SHEET = '設定', LOG_SHEET = '同期記録', DEVICE_SHEET = '端末';
@@ -32,6 +32,8 @@ function setup() {
 
   var copy = DriveApp.getFileById(SOURCE_ID).makeCopy(COPY_NAME);
   var ss = SpreadsheetApp.openById(copy.getId());
+  ss.setSpreadsheetTimeZone('Asia/Tokyo'); // AppSheet は日本時間の文字どおりに記録しているので合わせる
+  props.setProperty('DATA_VER', '2');
   var q = ss.getSheetByName(Q_SHEET);
   ensureColumns_(q);
   if (!ss.getSheetByName(LOG_SHEET)) ss.insertSheet(LOG_SHEET).appendRow(['opId', 'ID', '時刻']);
@@ -46,6 +48,7 @@ function doGet(e) {
     if (p.action === 'rows') return rows_(Number(p.offset) || 0, Math.min(Number(p.limit) || 500, 1000));
     if (p.action === 'changes') return changes_(Number(p.since) || 0, p.device || '');
     if (p.action === 'settings') return { ok: true, settings: readSettings_(p.device || '') };
+    if (p.action === 'daily') return daily_();
     throw new Error('不明な操作です');
   });
 }
@@ -135,6 +138,9 @@ function nextTs_() {
   return t;
 }
 
+/* データの読み方が変わったときに上げる。端末は違いを見つけると全件を読み直す */
+function dataVer_() { return PropertiesService.getScriptProperties().getProperty('DATA_VER') || '1'; }
+
 function ping_() {
   var q = book_().getSheetByName(Q_SHEET);
   return { ok: true, ver: VER, total: Math.max(0, q.getLastRow() - 1), rev: lastTs_() };
@@ -144,20 +150,20 @@ function rows_(offset, limit) {
   var q = book_().getSheetByName(Q_SHEET);
   var total = Math.max(0, q.getLastRow() - 1);
   var rev = lastTs_();
-  if (offset >= total) return { ok: true, total: total, rev: rev, rows: [] };
+  if (offset >= total) return { ok: true, total: total, rev: rev, rows: [], dv: dataVer_() };
   var n = Math.min(limit, total - offset);
   var head = headers_(q), c = colMap_(head);
   var vals = q.getRange(offset + 2, 1, n, head.length).getValues();
   var rows = [];
   for (var i = 0; i < vals.length; i++) if (vals[i][c['ID']] !== '') rows.push(encode_(vals[i], c));
-  return { ok: true, total: total, rev: rev, rows: rows, next: offset + n };
+  return { ok: true, total: total, rev: rev, rows: rows, next: offset + n, dv: dataVer_() };
 }
 
 function changes_(since, device) {
   var ss = book_(), q = ss.getSheetByName(Q_SHEET);
   var rest = studyRest_(ss, device);
   var total = q.getLastRow() - 1;
-  if (total < 1) return { ok: true, rev: since, rows: [], more: false, rest: rest };
+  if (total < 1) return { ok: true, rev: since, rows: [], more: false, rest: rest, dv: dataVer_() };
   var head = headers_(q), c = colMap_(head);
   var tsCol = q.getRange(2, c['更新時刻'] + 1, total, 1).getValues();
   var hits = [];
@@ -169,7 +175,25 @@ function changes_(since, device) {
   var more = hits.length > 300;
   if (more) hits = hits.slice(0, 300);
   var rows = hits.map(function (h) { return encode_(q.getRange(h.row, 1, 1, head.length).getValues()[0], c); });
-  return { ok: true, rev: hits.length ? hits[hits.length - 1].ts : since, rows: rows, more: more, rest: rest };
+  return { ok: true, rev: hits.length ? hits[hits.length - 1].ts : since, rows: rows, more: more, rest: rest, dv: dataVer_() };
+}
+
+/* T_history から日ごとの回答数を数える（動作確認の行は数えない）。鍵は 20261121 の形 */
+function daily_() {
+  var h = book_().getSheetByName(H_SHEET), last = h.getLastRow(), out = {}, count = 0, bad = 0;
+  if (last < 2) return { ok: true, daily: out, count: 0, bad: 0 };
+  var c = colMap_(headers_(h));
+  var ids = h.getRange(2, c['HistoryID'] + 1, last - 1, 1).getValues();
+  var ats = h.getRange(2, c['実施日時'] + 1, last - 1, 1).getValues();
+  for (var i = 0; i < ats.length; i++) {
+    if (String(ids[i][0]).indexOf('verify') === 0) continue;
+    var t = ms_(ats[i][0]);
+    if (t == null) { bad++; continue; }
+    var d = new Date(t), key = d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+    out[key] = (out[key] || 0) + 1;
+    count++;
+  }
+  return { ok: true, daily: out, count: count, bad: bad };
 }
 
 /* 学習回数 ＝ 元の回数 ＋ 各端末の回数。rest は「この端末以外」の合計 */

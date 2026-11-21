@@ -54,6 +54,10 @@ textarea { min-height: 130px; line-height: 1.6; resize: vertical; }
 .listBox { padding: 0; overflow: hidden; }
 
 .study { display: flex; flex-direction: column; min-height: 100%; }
+.score { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin-bottom: 8px; background: var(--line); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.score > div { min-width: 0; padding: 5px 2px; background: var(--card); text-align: center; line-height: 1.25; }
+.score span, .score small { display: block; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.score b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
 .qMeta { color: var(--muted); font-size: 12px; margin-bottom: 8px; line-height: 1.5; }
 .qText, .aText { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs); line-height: 1.75; }
 .aBox { margin-top: 12px; padding: 12px; border-radius: 8px; background: var(--answer); }
