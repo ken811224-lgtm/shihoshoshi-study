@@ -5,7 +5,7 @@
  * 複数端末の同期：○×は「いつ・どちらだったか」を問題ごとに積み、時刻順に計算し直す。
  * どの端末から、どの順番で届いても同じ結果になる。
  */
-var VER = '1.1.1';
+var VER = '1.1.2';
 var REQUIRED_Q = ['ID', '問題', '答え', '科目', '大分類', '中分類', '小分類', '正解数', '誤答数', '正答率', 'レベル', '次回実施日', '最終実施日', 'ウォーク問', '要修正', '借金'];
 var COPY_NAME = '司法書士スマホ学習_データ';
 var Q_SHEET = 'T_mondai', H_SHEET = 'T_history', S_SHEET = '設定', LOG_SHEET = '同期記録', DEVICE_SHEET = '端末';
@@ -13,6 +13,7 @@ var EXTRA = ['更新時刻', '削除', '本文時刻', '本文端末', '同期�
 var LOG_KEEP = 5000;
 var TIME_LIMIT_MS = 25000;
 var FUTURE_LIMIT_MS = 5 * 60000;
+var MAX_POWER = 16; // 2 の 16 乗日（約 179 年）。これより先は日付にできなくなるので止める
 
 /* 最初に 1 回だけ Apps Script の画面から実行する */
 function setup() {
@@ -120,7 +121,7 @@ function encode_(r, c) {
   return [
     num_(r[c['ID']]), str_(r[c['問題']]), str_(r[c['答え']]),
     str_(r[c['科目']]), str_(r[c['大分類']]), str_(r[c['中分類']]), str_(r[c['小分類']]),
-    num_(r[c['正解数']]), num_(r[c['誤答数']]), num_(r[c['レベル']]),
+    num_(r[c['正解数']]), num_(r[c['誤答数']]), Math.min(num_(r[c['レベル']]), num_(r[c['正解数']])),
     ms_(r[c['次回実施日']]), ms_(r[c['最終実施日']]),
     bool_(r[c['ウォーク問']]) ? 1 : 0, bool_(r[c['要修正']]) ? 1 : 0, num_(r[c['借金']]),
     bool_(r[c['削除']]) ? 1 : 0, num_(r[c['更新時刻']]), num_(r[c['本文時刻']])
@@ -214,13 +215,14 @@ function writeCount_(ss, device, own) {
 
 /* 元の状態に、○×を時刻順に当てはめて今の状態を出す（AppSheet と同じ式） */
 function replay_(base, events) {
-  var st = { c: base.c, w: base.w, lv: base.lv, debt: base.debt, next: base.next, last: base.last };
+  // レベルは正解数を超えない。元のデータに日付が混ざった行（レベル 46104 など）を正す
+  var st = { c: base.c, w: base.w, lv: Math.min(base.lv, base.c), debt: base.debt, next: base.next, last: base.last };
   events.forEach(function (e) {
     var at = e[0], ok = e[1] === 1;
     if (ok) {
       var d = new Date(at);
       d.setHours(0, 0, 0, 0);
-      d.setDate(d.getDate() + Math.pow(2, st.lv + 1));
+      d.setDate(d.getDate() + Math.pow(2, Math.min(st.lv + 1, MAX_POWER)));
       st.next = d.getTime();
       st.lv += 1; st.c += 1; st.debt = Math.max(0, st.debt - 1);
     } else {

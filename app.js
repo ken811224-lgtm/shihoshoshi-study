@@ -1,7 +1,7 @@
 /* 司法書士スマホ学習：画面と出題・同期 */
 (function () {
   'use strict';
-  var APP_VERSION = '1.1.0';
+  var APP_VERSION = '1.1.2';
   var GAS_PAT = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/;
   var URL_KEY = 'sms.url', FS_KEY = 'sms.fs', RESUME_KEY = 'sms.resume';
   var PAGE = 500, LIST_STEP = 50;
@@ -127,11 +127,12 @@
     if (!m) { toast('この問題は別の端末で消されました'); nextQuestion(); return; }
     var now = Date.now();
     if (ok) {
-      m.next = addDays(startOfToday(), Math.pow(2, (m.lv || 0) + 1));
-      m.lv = (m.lv || 0) + 1; m.c = (m.c || 0) + 1; m.debt = Math.max(0, (m.debt || 0) - 1);
+      m.lv = Math.min(m.lv || 0, m.c || 0); // レベルは正解数を超えない（元データの異常値よけ）
+      m.next = addDays(startOfToday(), Math.pow(2, Math.min(m.lv + 1, 16)));
+      m.lv = m.lv + 1; m.c = (m.c || 0) + 1; m.debt = Math.max(0, (m.debt || 0) - 1);
     } else {
       m.next = now + 30 * 60000;
-      m.lv = Math.max(0, (m.lv || 0) - 1); m.w = (m.w || 0) + 1; m.debt = (m.debt || 0) + 1;
+      m.lv = Math.max(0, Math.min(m.lv || 0, m.c || 0) - 1); m.w = (m.w || 0) + 1; m.debt = (m.debt || 0) + 1;
     }
     m.last = now;
     study.own++;
@@ -619,6 +620,7 @@
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
     metas = await req('meta', 'readonly', function (s) { return s.getAll(); }) || [];
     metas.sort(function (a, b) { return a.id - b.id; });
+    metas.forEach(function (m) { if ((m.lv || 0) > (m.c || 0)) m.lv = m.c || 0; });
     byId = new Map(metas.map(function (m) { return [m.id, m]; }));
     var savedSettings = await kvGet('settings') || {};
     settings = Object.assign(settings, savedSettings);
