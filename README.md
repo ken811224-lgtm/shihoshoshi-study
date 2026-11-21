@@ -9,4 +9,5 @@ AppSheet「司法書士データベース」をもとにした、スマホ用の
 
 ## 版を上げるとき
 
-`app.js` の `APP_VERSION`、`sw.js` の `CACHE`、`CHANGELOG.md` を一緒に上げて push する。
+`app.js` の `APP_VERSION`、`sw.js` の `CACHE`、`CHANGELOG.md` を一緒に上げて、`publish.ps1 "内容"` を実行する。
+GitHub へ公開したあと、OneDrive の `claudecode\司法書士スマホ学習` と `009 ＡＣＣＥＳＳデータベース\014_司法書士スマホ学習` へ自動で保存する（`-SaveOnly` は保存だけ、`-Check` は確認だけ）。

@@ -58,6 +58,12 @@ textarea { min-height: 130px; line-height: 1.6; resize: vertical; }
 .score > div { min-width: 0; padding: 5px 2px; background: var(--card); text-align: center; line-height: 1.25; }
 .score span, .score small { display: block; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .score b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+.launch { margin-bottom: 8px; padding: 8px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+.launchTop { display: flex; align-items: baseline; gap: 6px; font-size: 13px; color: var(--muted); }
+.launchTop b { font-size: 26px; line-height: 1.1; color: var(--text); font-variant-numeric: tabular-nums; }
+.launchTop em { margin-left: auto; font-style: normal; font-weight: 700; color: var(--accent); }
+.launch .bar { margin: 4px 0 0; }
+.launch.done { border-color: var(--accent); background: var(--answer); }
 .qMeta { color: var(--muted); font-size: 12px; margin-bottom: 8px; line-height: 1.5; }
 .qText, .aText { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs); line-height: 1.75; }
 .aBox { margin-top: 12px; padding: 12px; border-radius: 8px; background: var(--answer); }

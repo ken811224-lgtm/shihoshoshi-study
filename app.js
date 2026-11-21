@@ -1,7 +1,7 @@
 /* 司法書士スマホ学習：画面と出題・同期 */
 (function () {
   'use strict';
-  var APP_VERSION = '1.2.0';
+  var APP_VERSION = '1.3.0';
   var GAS_PAT = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/;
   var URL_KEY = 'sms.url', FS_KEY = 'sms.fs', RESUME_KEY = 'sms.resume';
   var PAGE = 500, LIST_STEP = 50;
@@ -10,6 +10,9 @@
   var settings = { subject: '', large: '', startId: 0, walk: 0, fix: 0 }; // 絞り込みは端末ごと
   var study = { own: 0, rest: 0 }, conflicts = [], deviceId = ''; // 学習回数 ＝ この端末 ＋ ほかの合計
   var daily = {}, needDaily = true; // 日ごとの回答数（鍵は 20261121 の形）
+  var grading = false, gradeSeq = 0; // ○×の処理中（二度押しを止める）
+  var LAUNCH_KEY = 'sms.launch', LAUNCH_GOAL = 10, LAUNCH_AWAY = 5 * 60000; // 5 分以上離れたら、次は 0 から
+  var launch = { n: 0, away: 0 }; // 立ち上げてから解いた数
   var S = { tab: 'home', view: 'home', mode: null, curId: null, revealed: false, trail: [], editId: null, editFrom: null,
     syncing: false, pending: 0, wantReload: false, list: { q: '', s: '', l: '', flag: '', shown: LIST_STEP, ids: [] } };
 
@@ -124,33 +127,40 @@
   function addDays(ms, n) { var d = new Date(ms); d.setDate(d.getDate() + n); return d.getTime(); }
 
   async function grade(ok) {
-    var m = byId.get(S.curId);
-    if (!m) { toast('この問題は別の端末で消されました'); nextQuestion(); return; }
-    var now = Date.now();
-    if (ok) {
-      m.lv = Math.min(m.lv || 0, m.c || 0); // レベルは正解数を超えない（元データの異常値よけ）
-      m.next = addDays(startOfToday(), Math.pow(2, Math.min(m.lv + 1, 16)));
-      m.lv = m.lv + 1; m.c = (m.c || 0) + 1; m.debt = Math.max(0, (m.debt || 0) - 1);
-    } else {
-      m.next = now + 30 * 60000;
-      m.lv = Math.max(0, Math.min(m.lv || 0, m.c || 0) - 1); m.w = (m.w || 0) + 1; m.debt = (m.debt || 0) + 1;
+    if (grading) return; // 次の問題が出るまでの二度押しは数えない
+    grading = true; gradeSeq++;
+    try {
+      var m = byId.get(S.curId);
+      if (!m) { toast('この問題は別の端末で消されました'); await nextQuestion(); return; }
+      var now = Date.now();
+      if (ok) {
+        m.lv = Math.min(m.lv || 0, m.c || 0); // レベルは正解数を超えない（元データの異常値よけ）
+        m.next = addDays(startOfToday(), Math.pow(2, Math.min(m.lv + 1, 16)));
+        m.lv = m.lv + 1; m.c = (m.c || 0) + 1; m.debt = Math.max(0, (m.debt || 0) - 1);
+      } else {
+        m.next = now + 30 * 60000;
+        m.lv = Math.max(0, Math.min(m.lv || 0, m.c || 0) - 1); m.w = (m.w || 0) + 1; m.debt = (m.debt || 0) + 1;
+      }
+      m.last = now;
+      study.own++;
+      launch.n++; saveLaunch();
+      var dk = dayKey(now); daily[dk] = (daily[dk] || 0) + 1;
+      await kvSet('daily', daily);
+      await saveMeta(m);
+      await kvSet('study', study);
+      await kvSet('countDirty', true);
+      await addOp('grade', m.id, { ok: ok, at: now }); // 送るのは結果と時刻だけ。数値はサーバーが時刻順に計算する
+      await nextQuestion();
+    } finally {
+      grading = false;
     }
-    m.last = now;
-    study.own++;
-    var dk = dayKey(now); daily[dk] = (daily[dk] || 0) + 1;
-    await kvSet('daily', daily);
-    await saveMeta(m);
-    await kvSet('study', study);
-    await kvSet('countDirty', true);
-    await addOp('grade', m.id, { ok: ok, at: now }); // 送るのは結果と時刻だけ。数値はサーバーが時刻順に計算する
-    nextQuestion();
   }
   function nextQuestion() {
     var id = pickNext(S.mode, S.curId);
     if (id == null) { toast('出せる問題がありません'); go('home'); return; }
     if (S.curId != null) S.trail.push(S.curId);
     if (S.trail.length > 50) S.trail.shift();
-    showQuestion(id);
+    return showQuestion(id);
   }
 
   /* ---------- 画面 ---------- */
@@ -194,7 +204,7 @@
       if (!a) fresh++; else if (m.next != null && m.next <= now) due++;
     });
     var st = settings;
-    main.innerHTML =
+    main.innerHTML = launchHtml() +
       (conflicts.length ? '<div class="card"><h2>修正がぶつかった問題 ' + conflicts.length + ' 件</h2><p class="muted">別の端末でも同じ問題が直されています。どちらを残すか選んでください。</p><button class="btn primary" data-act="openConflict">確認する</button></div>' : '') +
       '<div class="card"><div class="stats">' +
       '<div class="stat"><b>' + todayN.toLocaleString() + '</b><span>今日の回答</span></div>' +
@@ -210,6 +220,30 @@
       '<button class="btn primary" data-act="start" data-mode="subject">科目別で学習</button></div>' +
       '<div class="card"><h2>ID順</h2><label class="f">開始ID<input id="startId" type="number" inputmode="numeric" value="' + (st.startId || '') + '"></label>' +
       '<button class="btn" data-act="start" data-mode="id">この ID から学習</button></div>';
+  }
+
+  /* ---------- 立ち上げてから解いた数（開くと 0、1 問ごとに +1、目標 10 問） ---------- */
+  function saveLaunch() { try { sessionStorage.setItem(LAUNCH_KEY, JSON.stringify(launch)); } catch (e) {} }
+  function launchHtml() {
+    var n = launch.n, done = n >= LAUNCH_GOAL;
+    return '<div class="launch' + (done ? ' done' : '') + '" id="launch"><div class="launchTop"><span>今回</span><b>' + n.toLocaleString() + '</b><span>/ ' + LAUNCH_GOAL + ' 問</span>' +
+      '<em>' + (done ? '目標達成' : 'あと ' + (LAUNCH_GOAL - n) + ' 問') + '</em></div>' +
+      '<div class="bar"><i style="width:' + Math.min(100, n / LAUNCH_GOAL * 100) + '%"></i></div></div>';
+  }
+  function paintLaunch() { var b = $('launch'); if (b) b.outerHTML = launchHtml(); }
+  function leftApp() { if (!launch.away) { launch.away = Date.now(); saveLaunch(); } }
+  function backToApp() {
+    if (launch.away && Date.now() - launch.away >= LAUNCH_AWAY) launch.n = 0;
+    launch.away = 0; saveLaunch(); paintLaunch();
+  }
+  function setupLaunch() {
+    var x = null;
+    try { x = JSON.parse(sessionStorage.getItem(LAUNCH_KEY) || 'null'); } catch (e) {}
+    launch = { n: (x && x.n) || 0, away: (x && x.away) || 0 }; // 自動更新の読み直しでは数を消さない
+    backToApp();
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') leftApp(); else backToApp(); });
+    window.addEventListener('pagehide', leftApp);
+    window.addEventListener('pageshow', function () { if (document.visibilityState === 'visible') backToApp(); });
   }
 
   /* ---------- 解いた数の記録（週は月曜はじまり） ---------- */
@@ -245,7 +279,12 @@
   }
   async function refreshDaily() {
     var j = await api({ action: 'daily' }), merged = j.daily || {};
-    var ops = await req('ops', 'readonly', function (s) { return s.getAll(); });
+    var ops, seq;
+    do { // ○×の処理と重なると 1 問分ずれるので、終わるのを待って読む
+      while (grading) await new Promise(function (r) { setTimeout(r, 20); });
+      seq = gradeSeq;
+      ops = await req('ops', 'readonly', function (s) { return s.getAll(); });
+    } while (grading || seq !== gradeSeq);
     ops.forEach(function (o) { // まだ送っていない回答も足す
       if (o.type !== 'grade') return;
       var k = dayKey(o.data.at || o.data.last);
@@ -262,7 +301,7 @@
     S.curId = id; S.revealed = false;
     if (S.view !== 'study') { S.view = 'study'; $('title').textContent = TITLES.study; $('backBtn').hidden = false; $('tabs').hidden = true; }
     var cat = [m.s, m.l, m.m, m.n].filter(Boolean).map(esc).join(' › ');
-    main.innerHTML = '<div class="study"><div class="score" id="score">' + scoreHtml() + '</div>' +
+    main.innerHTML = '<div class="study">' + launchHtml() + '<div class="score" id="score">' + scoreHtml() + '</div>' +
       '<div class="qMeta">ID ' + m.id + ' ・ レベル ' + (m.lv || 0) + ' ・ ○' + (m.c || 0) + ' ×' + (m.w || 0) + ' ・ 借金 ' + (m.debt || 0) + '<br>' + cat + '</div>' +
       '<div class="tools"><button data-act="prev"' + (S.trail.length ? '' : ' disabled') + '>前へ</button><button data-act="skip">スキップ</button>' +
       '<button data-act="flag" data-f="walk" class="' + (m.walk ? 'on' : '') + '">ウォーク</button><button data-act="flag" data-f="fix" class="' + (m.fix ? 'on' : '') + '">要修正</button><button data-act="edit">修正</button></div>' +
@@ -699,6 +738,7 @@
   /* ---------- 起動 ---------- */
   async function boot() {
     applyFs();
+    setupLaunch();
     db = await openDb();
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
     metas = await req('meta', 'readonly', function (s) { return s.getAll(); }) || [];
