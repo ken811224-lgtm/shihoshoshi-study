@@ -1,5 +1,5 @@
 /* 画面の部品を端末にしまう。版を上げたら CACHE も app.js の APP_VERSION と同じ番号にする */
-var CACHE = 'sms-v1.0.0';
+var CACHE = 'sms-v1.0.1';
 var FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.json',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
@@ -23,7 +23,11 @@ self.addEventListener('fetch', function (e) {
   e.respondWith(caches.open(CACHE).then(function (c) {
     return c.match(req, { ignoreSearch: true }).then(function (hit) {
       if (hit) return hit;
-      return fetch(req).catch(function () {
+      // 同じ公開先の別アプリの更新で部品が消えても、次に通信できたときにしまい直す
+      return fetch(req).then(function (res) {
+        if (res && res.ok) c.put(req, res.clone());
+        return res;
+      }).catch(function () {
         if (req.mode === 'navigate') return c.match('index.html');
         return new Response('', { status: 504 });
       });

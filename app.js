@@ -1,7 +1,8 @@
 /* 司法書士スマホ学習：画面と出題・同期 */
 (function () {
   'use strict';
-  var APP_VERSION = '1.0.0';
+  var APP_VERSION = '1.0.1';
+  var GAS_PAT = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/;
   var URL_KEY = 'sms.url', FS_KEY = 'sms.fs', RESUME_KEY = 'sms.resume';
   var PAGE = 500, LIST_STEP = 50;
 
@@ -472,7 +473,7 @@
     delete: deleteCurrent,
     saveUrl: function () {
       var u = $('url').value.trim();
-      if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(u)) { toast('URL の形が違います'); return; }
+      if (!GAS_PAT.test(u)) { toast('URL の形が違います'); return; }
       try { localStorage.setItem(URL_KEY, u); } catch (e) {}
       sync(true);
     },
@@ -527,6 +528,18 @@
     });
   }
 
+  /* 設定用 QR の接続先を受け取り、アドレス欄からはすぐ消す */
+  function importFromQr() {
+    var m = /^#gas=(.+)$/.exec(location.hash);
+    if (!m) return false;
+    history.replaceState(null, '', location.pathname);
+    var u = '';
+    try { u = decodeURIComponent(m[1]); } catch (e) { return false; }
+    if (!GAS_PAT.test(u)) return false;
+    try { localStorage.setItem(URL_KEY, u); } catch (e) { return false; }
+    return true;
+  }
+
   /* ---------- 起動 ---------- */
   async function boot() {
     applyFs();
@@ -538,6 +551,11 @@
     settings = Object.assign(settings, await kvGet('settings') || {});
     S.pending = await req('ops', 'readonly', function (s) { return s.count(); });
     paintSync();
+    if (importFromQr()) {
+      go('settings'); setupUpdate();
+      toast('接続先を受け取りました', 3500);
+      return;
+    }
     var resume = null; try { resume = JSON.parse(sessionStorage.getItem(RESUME_KEY) || 'null'); } catch (e) {}
     if (resume && resume.id != null && byId.has(resume.id)) { S.mode = resume.mode; showQuestion(resume.id); }
     else go('home');
