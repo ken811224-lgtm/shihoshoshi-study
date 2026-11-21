@@ -1,7 +1,7 @@
 /* 司法書士スマホ学習：画面と出題・同期 */
 (function () {
   'use strict';
-  var APP_VERSION = '1.1.2';
+  var APP_VERSION = '1.1.3';
   var GAS_PAT = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/;
   var URL_KEY = 'sms.url', FS_KEY = 'sms.fs', RESUME_KEY = 'sms.resume';
   var PAGE = 500, LIST_STEP = 50;
@@ -512,6 +512,26 @@
     if (g('startId')) settings.startId = Number(g('startId').value) || 0;
     kvSet('settings', settings);
   }
+  /* 古い iPhone でも動くコピー（押した瞬間に同期で行う） */
+  function copyText(text) {
+    var t = document.createElement('textarea'), ok = false, sel = window.getSelection();
+    t.value = text;
+    t.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px;';
+    t.contentEditable = 'true';
+    document.body.appendChild(t);
+    try {
+      var r = document.createRange();
+      r.selectNodeContents(t);
+      sel.removeAllRanges(); sel.addRange(r);
+      t.focus();
+      t.setSelectionRange(0, text.length);
+      ok = document.execCommand('copy');
+    } catch (e) { ok = false; }
+    sel.removeAllRanges();
+    t.blur();
+    document.body.removeChild(t);
+    return ok;
+  }
   var actions = {
     goSettings: function () { go('settings'); },
     start: function (el) {
@@ -550,7 +570,18 @@
       try { localStorage.setItem(URL_KEY, u); } catch (e) {}
       sync(true);
     },
-    copyUrl: function () { var u = gasUrl(); if (u && navigator.clipboard) navigator.clipboard.writeText(u).then(function () { toast('コピーしました'); }); },
+    copyUrl: function () {
+      var box = $('url'), u = ((box && box.value) || gasUrl()).trim();
+      if (!GAS_PAT.test(u)) { toast('接続先が入っていません。最初の設定用 QR から開いてください', 4500); return; }
+      if (copyText(u)) { toast('コピーしました'); return; }
+      var manual = function () {
+        if (box) { box.value = u; box.focus(); box.setSelectionRange(0, u.length); }
+        toast('自動でコピーできません。選ばれた文字を［コピー］してください', 5000);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(u).then(function () { toast('コピーしました'); }, manual);
+      } else manual();
+    },
     redownload: function () {
       if (S.pending) { toast('未送信を送ってからにしてください'); return; }
       if (confirm('端末の問題を入れ直しますか？')) sync(true, true);
