@@ -1,7 +1,7 @@
 /* 司法書士スマホ学習：画面と出題・同期 */
 (function () {
   'use strict';
-  var APP_VERSION = '1.3.0';
+  var APP_VERSION = '1.4.0';
   var GAS_PAT = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/;
   var URL_KEY = 'sms.url', FS_KEY = 'sms.fs', RESUME_KEY = 'sms.resume';
   var PAGE = 500, LIST_STEP = 50;
@@ -10,6 +10,8 @@
   var settings = { subject: '', large: '', startId: 0, walk: 0, fix: 0 }; // 絞り込みは端末ごと
   var study = { own: 0, rest: 0 }, conflicts = [], deviceId = ''; // 学習回数 ＝ この端末 ＋ ほかの合計
   var daily = {}, needDaily = true; // 日ごとの回答数（鍵は 20261121 の形）
+  var goalDaily = {}; // 日ごとの 10問達成の回数（10・20・30 問目でそれぞれ 1 回）
+  var DASH_KEY = 'sms.dash';
   var grading = false, gradeSeq = 0; // ○×の処理中（二度押しを止める）
   var LAUNCH_KEY = 'sms.launch', LAUNCH_GOAL = 10, LAUNCH_AWAY = 5 * 60000; // 5 分以上離れたら、次は 0 から
   var launch = { n: 0, away: 0 }; // 立ち上げてから解いた数
@@ -146,11 +148,18 @@
       launch.n++; saveLaunch();
       var dk = dayKey(now); daily[dk] = (daily[dk] || 0) + 1;
       await kvSet('daily', daily);
+      var hitGoal = launch.n % LAUNCH_GOAL === 0 ? launch.n : 0;
+      if (hitGoal) {
+        goalDaily[dk] = (goalDaily[dk] || 0) + 1;
+        await kvSet('goalDaily', goalDaily);
+        await addOp('goal', 0, { at: now, n: hitGoal });
+      }
       await saveMeta(m);
       await kvSet('study', study);
       await kvSet('countDirty', true);
       await addOp('grade', m.id, { ok: ok, at: now }); // 送るのは結果と時刻だけ。数値はサーバーが時刻順に計算する
       await nextQuestion();
+      if (hitGoal) toast('🎯 ' + hitGoal + '問 達成！（今日 ' + (goalDaily[dk] || 0) + ' 回目）', 3000);
     } finally {
       grading = false;
     }
@@ -219,16 +228,20 @@
       '<label class="check"><input type="checkbox" id="fixOnly"' + (st.fix ? ' checked' : '') + '>要修正だけ</label>' +
       '<button class="btn primary" data-act="start" data-mode="subject">科目別で学習</button></div>' +
       '<div class="card"><h2>ID順</h2><label class="f">開始ID<input id="startId" type="number" inputmode="numeric" value="' + (st.startId || '') + '"></label>' +
-      '<button class="btn" data-act="start" data-mode="id">この ID から学習</button></div>';
+      '<button class="btn" data-act="start" data-mode="id">この ID から学習</button></div>' +
+      dashHtml();
   }
 
   /* ---------- 立ち上げてから解いた数（開くと 0、1 問ごとに +1、目標 10 問） ---------- */
   function saveLaunch() { try { sessionStorage.setItem(LAUNCH_KEY, JSON.stringify(launch)); } catch (e) {} }
   function launchHtml() {
-    var n = launch.n, done = n >= LAUNCH_GOAL;
-    return '<div class="launch' + (done ? ' done' : '') + '" id="launch"><div class="launchTop"><span>今回</span><b>' + n.toLocaleString() + '</b><span>/ ' + LAUNCH_GOAL + ' 問</span>' +
-      '<em>' + (done ? '目標達成' : 'あと ' + (LAUNCH_GOAL - n) + ' 問') + '</em></div>' +
-      '<div class="bar"><i style="width:' + Math.min(100, n / LAUNCH_GOAL * 100) + '%"></i></div></div>';
+    var n = launch.n, sets = Math.floor(n / LAUNCH_GOAL), done = sets > 0;
+    var just = done && n % LAUNCH_GOAL === 0; // ちょうど 10・20…問のときは満タンで見せる
+    var goalNow = just ? n : (sets + 1) * LAUNCH_GOAL, rest = goalNow - n; // 10 問を超えたら次は 20・30…
+    var msg = done ? '🎯 目標達成' + (sets > 1 ? ' ×' + sets : '') + (just ? '' : '・次まで ' + rest + ' 問') : 'あと ' + rest + ' 問';
+    return '<div class="launch' + (done ? ' done' : '') + '" id="launch"><div class="launchTop"><span>今回</span><b>' + n.toLocaleString() + '</b><span>/ ' + goalNow + ' 問</span>' +
+      '<em>' + msg + '</em></div>' +
+      '<div class="bar"><i style="width:' + (just ? 100 : (n - sets * LAUNCH_GOAL) / LAUNCH_GOAL * 100) + '%"></i></div></div>';
   }
   function paintLaunch() { var b = $('launch'); if (b) b.outerHTML = launchHtml(); }
   function leftApp() { if (!launch.away) { launch.away = Date.now(); saveLaunch(); } }
@@ -253,30 +266,104 @@
     x.setDate(x.getDate() - (x.getDay() + 6) % 7);
     return dayKey(x.getTime());
   }
-  function scoreStats() {
+  function statsOf(map) {
     var now = new Date(), today = dayKey(now.getTime());
     var thisWeek = weekKeyOf(now.getFullYear(), now.getMonth() + 1, now.getDate());
-    var thisMonth = Math.floor(today / 100), weeks = {}, months = {}, bestDay = 0;
-    Object.keys(daily).forEach(function (k) {
-      var key = Number(k), n = daily[k], y = Math.floor(key / 10000), m = Math.floor(key / 100) % 100, d = key % 100;
+    var thisMonth = Math.floor(today / 100), weeks = {}, months = {}, bestDay = 0, total = 0;
+    Object.keys(map).forEach(function (k) {
+      var key = Number(k), n = map[k], y = Math.floor(key / 10000), m = Math.floor(key / 100) % 100, d = key % 100;
       if (n > bestDay) bestDay = n;
+      total += n;
       var w = weekKeyOf(y, m, d), mo = Math.floor(key / 100);
       weeks[w] = (weeks[w] || 0) + n;
       months[mo] = (months[mo] || 0) + n;
     });
     var max = function (o) { return Object.keys(o).reduce(function (a, k) { return Math.max(a, o[k]); }, 0); };
-    var total = 0;
-    for (var i = 0; i < metas.length; i++) total += answered(metas[i]);
-    return { today: daily[today] || 0, week: weeks[thisWeek] || 0, month: months[thisMonth] || 0, total: total,
+    return { today: map[today] || 0, week: weeks[thisWeek] || 0, month: months[thisMonth] || 0, total: total,
       bestDay: bestDay, bestWeek: max(weeks), bestMonth: max(months) };
   }
-  function scoreHtml() {
-    var s = scoreStats(), cell = function (label, v, sub) {
-      return '<div><span>' + label + '</span><b>' + v.toLocaleString() + '</b><small>' + sub + '</small></div>';
-    };
-    return cell('今日', s.today, '最高 ' + s.bestDay.toLocaleString()) + cell('今週', s.week, '最高 ' + s.bestWeek.toLocaleString()) +
-      cell('今月', s.month, '最高 ' + s.bestMonth.toLocaleString()) + cell('累計', s.total, '全期間');
+  function scoreStats() {
+    var s = statsOf(daily), total = 0;
+    for (var i = 0; i < metas.length; i++) total += answered(metas[i]);
+    s.total = total;
+    return s;
   }
+  function scoreHtml() {
+    var s = scoreStats(), g = statsOf(goalDaily), cell = function (label, v, sub, gv) {
+      return '<div><span>' + label + '</span><b>' + v.toLocaleString() + '</b><small>' + sub + '</small>' +
+        '<small class="goal">🎯 ' + gv.toLocaleString() + '回</small></div>';
+    };
+    return cell('今日', s.today, '最高 ' + s.bestDay.toLocaleString(), g.today) + cell('今週', s.week, '最高 ' + s.bestWeek.toLocaleString(), g.week) +
+      cell('今月', s.month, '最高 ' + s.bestMonth.toLocaleString(), g.month) + cell('累計', s.total, '全期間', g.total);
+  }
+
+  /* ---------- ホームのグラフ（解いた数・10問達成） ---------- */
+  function dashRange() { try { return localStorage.getItem(DASH_KEY) || 'week'; } catch (e) { return 'week'; } }
+  function keyDate(k) { return new Date(Math.floor(k / 10000), Math.floor(k / 100) % 100 - 1, k % 100); }
+  function dashSeries(range, map) {
+    var now = new Date(), WD = ['日', '月', '火', '水', '木', '金', '土'], out = [], i, x, k;
+    var sumBy = function (f) { var o = {}; Object.keys(map).forEach(function (key) { var g = f(Number(key)); o[g] = (o[g] || 0) + map[key]; }); return o; };
+    if (range === 'weeks') {
+      var byW = sumBy(function (key) { return weekKeyOf(Math.floor(key / 10000), Math.floor(key / 100) % 100, key % 100); });
+      var w0 = keyDate(weekKeyOf(now.getFullYear(), now.getMonth() + 1, now.getDate()));
+      for (i = 11; i >= 0; i--) {
+        x = new Date(w0); x.setDate(x.getDate() - i * 7); k = dayKey(x.getTime());
+        out.push({ count: byW[k] || 0, cur: i === 0, lbl: (x.getMonth() + 1) + '/' + x.getDate(), sub: i === 0 ? '今週' : '', tip: (x.getMonth() + 1) + '/' + x.getDate() + ' からの週' });
+      }
+    } else if (range === 'months') {
+      var byM = sumBy(function (key) { return Math.floor(key / 100); });
+      for (i = 11; i >= 0; i--) {
+        x = new Date(now.getFullYear(), now.getMonth() - i, 1); k = x.getFullYear() * 100 + x.getMonth() + 1;
+        out.push({ count: byM[k] || 0, cur: i === 0, lbl: (x.getMonth() + 1) + '月', sub: (i === 11 || x.getMonth() === 0) ? String(x.getFullYear()) : '', tip: x.getFullYear() + '年' + (x.getMonth() + 1) + '月' });
+      }
+    } else {
+      var days = range === 'month' ? 30 : 7, t = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      for (i = days - 1; i >= 0; i--) {
+        x = new Date(t); x.setDate(x.getDate() - i); k = dayKey(x.getTime());
+        var show = days === 7 || i % 5 === 0;
+        out.push({ count: map[k] || 0, cur: i === 0, lbl: show ? (days === 7 ? (x.getMonth() + 1) + '/' + x.getDate() : String(x.getDate())) : '',
+          sub: days === 7 ? '(' + WD[x.getDay()] + ')' : '', tip: (x.getMonth() + 1) + '/' + x.getDate() + '(' + WD[x.getDay()] + ')' });
+      }
+    }
+    return out;
+  }
+  function barsSvg(data, color, unit, H, W) {
+    var n = data.length, max = Math.max.apply(null, [1].concat(data.map(function (d) { return d.count; })));
+    var padL = 4, padR = 4, padTop = 18, padBottom = 26, plotW = W - padL - padR, plotH = H - padTop - padBottom;
+    var gap = n <= 12 ? 8 : 3, barW = Math.max(2, (plotW - gap * (n - 1)) / n), maxShown = false;
+    var s = '<line x1="' + padL + '" x2="' + (W - padR) + '" y1="' + (padTop + plotH + 0.5) + '" y2="' + (padTop + plotH + 0.5) + '" stroke="var(--line)"></line>';
+    data.forEach(function (d, i) {
+      var x = padL + i * (barW + gap), cx = (x + barW / 2).toFixed(1);
+      var h = d.count ? Math.max(3, d.count / max * plotH) : 0, y = padTop + plotH - h;
+      s += '<g><title>' + d.tip + '：' + d.count.toLocaleString() + unit + '</title>' +
+        '<rect x="' + x.toFixed(1) + '" y="' + padTop + '" width="' + barW.toFixed(1) + '" height="' + plotH + '" fill="transparent"></rect>';
+      if (h) s += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + barW.toFixed(1) + '" height="' + h.toFixed(1) + '" rx="3" fill="' + color + '" opacity="' + (d.cur ? 1 : 0.6) + '"></rect>';
+      var top = d.count === max && !maxShown; // 一番高い棒は 1 本だけ数字を出す
+      if (top) maxShown = true;
+      if (d.count && (n <= 12 || top || d.cur)) s += '<text x="' + cx + '" y="' + (y - 4).toFixed(1) + '" text-anchor="middle" font-size="11" fill="var(--muted)">' + d.count + '</text>';
+      s += '</g>';
+      if (d.lbl) s += '<text x="' + cx + '" y="' + (H - 13) + '" text-anchor="middle" font-size="11" fill="' + (d.cur ? 'var(--text)' : 'var(--muted)') + '">' + d.lbl + '</text>';
+      if (d.sub) s += '<text x="' + cx + '" y="' + (H - 1) + '" text-anchor="middle" font-size="10" fill="var(--muted)">' + d.sub + '</text>';
+    });
+    return '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:' + H + 'px;display:block">' + s + '</svg>';
+  }
+  function dashHtml() {
+    var range = dashRange();
+    if (['week', 'month', 'weeks', 'months'].indexOf(range) < 0) range = 'week';
+    var W = Math.max(280, Math.round((main.clientWidth || 360) - 24 - 30)); // 画面の幅で描く（文字が小さくならない）
+    var unitName = { week: '日', month: '日', weeks: '週', months: '月' }[range];
+    var label = { week: '直近7日間', month: '直近30日間', weeks: '直近12週', months: '直近12か月' }[range];
+    var data = dashSeries(range, daily), gdata = dashSeries(range, goalDaily);
+    var total = data.reduce(function (a, d) { return a + d.count; }, 0), gtotal = gdata.reduce(function (a, d) { return a + d.count; }, 0);
+    var btn = function (r, t) { return '<button data-act="dash" data-r="' + r + '" class="' + (r === range ? 'on' : '') + '">' + t + '</button>'; };
+    return '<div class="card" id="dash"><h2>学習の記録</h2>' +
+      '<div class="score dashTiles">' + scoreHtml() + '</div>' +
+      '<div class="seg">' + btn('week', '7日') + btn('month', '30日') + btn('weeks', '週ごと') + btn('months', '月ごと') + '</div>' +
+      '<div class="dashH">解いた問題数（' + unitName + 'ごと）</div>' + barsSvg(data, 'var(--accent)', '問', 170, W) +
+      '<div class="dashH">🎯 10問達成の回数（' + unitName + 'ごと）</div>' + barsSvg(gdata, 'var(--warn)', '回', 120, W) +
+      '<p class="muted" style="margin:6px 0 0">' + label + '：解いた ' + total.toLocaleString() + '問（平均 ' + (total / data.length).toFixed(1) + '問/' + unitName + '）・10問達成 ' + gtotal + '回</p></div>';
+  }
+  function paintDash() { var b = $('dash'); if (b) b.outerHTML = dashHtml(); }
   async function refreshDaily() {
     var j = await api({ action: 'daily' }), merged = j.daily || {};
     var ops, seq;
@@ -285,14 +372,18 @@
       seq = gradeSeq;
       ops = await req('ops', 'readonly', function (s) { return s.getAll(); });
     } while (grading || seq !== gradeSeq);
+    var goals = j.goals ? Object.assign({}, j.goals) : null; // 古いサーバーは返さないので、そのときは手元の数のまま
     ops.forEach(function (o) { // まだ送っていない回答も足す
+      if (o.type === 'goal' && goals) { var g = dayKey(o.data.at); goals[g] = (goals[g] || 0) + 1; return; }
       if (o.type !== 'grade') return;
       var k = dayKey(o.data.at || o.data.last);
       merged[k] = (merged[k] || 0) + 1;
     });
     daily = merged; needDaily = false;
     await kvSet('daily', daily);
+    if (goals) { goalDaily = goals; await kvSet('goalDaily', goalDaily); }
     var box = $('score'); if (box) box.innerHTML = scoreHtml();
+    paintDash();
   }
 
   async function showQuestion(id) {
@@ -625,6 +716,7 @@
   }
   var actions = {
     goSettings: function () { go('settings'); },
+    dash: function (el) { try { localStorage.setItem(DASH_KEY, el.dataset.r); } catch (e) {} paintDash(); },
     start: function (el) {
       readHomeFilters(); S.mode = el.dataset.mode; S.curId = null; S.trail = [];
       var id = S.mode === 'id' ? (poolFor('id')[0] || {}).id : pickNext(S.mode, null);
@@ -750,6 +842,7 @@
     study = await kvGet('study') || { own: 0, rest: Number(savedSettings.study) || 0 }; // 1.0 の回数はほかの合計へ
     conflicts = await kvGet('conflicts') || [];
     daily = await kvGet('daily') || {};
+    goalDaily = await kvGet('goalDaily') || {};
     deviceId = await kvGet('device');
     if (!deviceId) { deviceId = 'd' + uid(); await kvSet('device', deviceId); }
     S.pending = await req('ops', 'readonly', function (s) { return s.count(); });

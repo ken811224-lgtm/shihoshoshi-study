@@ -5,10 +5,10 @@
  * 複数端末の同期：○×は「いつ・どちらだったか」を問題ごとに積み、時刻順に計算し直す。
  * どの端末から、どの順番で届いても同じ結果になる。
  */
-var VER = '1.2.0';
+var VER = '1.4.0';
 var REQUIRED_Q = ['ID', '問題', '答え', '科目', '大分類', '中分類', '小分類', '正解数', '誤答数', '正答率', 'レベル', '次回実施日', '最終実施日', 'ウォーク問', '要修正', '借金'];
 var COPY_NAME = '司法書士スマホ学習_データ';
-var Q_SHEET = 'T_mondai', H_SHEET = 'T_history', S_SHEET = '設定', LOG_SHEET = '同期記録', DEVICE_SHEET = '端末';
+var Q_SHEET = 'T_mondai', H_SHEET = 'T_history', S_SHEET = '設定', LOG_SHEET = '同期記録', DEVICE_SHEET = '端末', GOAL_SHEET = '10問達成';
 var EXTRA = ['更新時刻', '削除', '本文時刻', '本文端末', '同期履歴'];
 var LOG_KEEP = 5000;
 var TIME_LIMIT_MS = 25000;
@@ -193,7 +193,25 @@ function daily_() {
     out[key] = (out[key] || 0) + 1;
     count++;
   }
-  return { ok: true, daily: out, count: count, bad: bad };
+  return { ok: true, daily: out, count: count, bad: bad, goals: goals_() };
+}
+
+/* 10問達成の日ごとの回数（鍵は 20261121 の形） */
+function goals_() {
+  var g = book_().getSheetByName(GOAL_SHEET), out = {};
+  if (!g || g.getLastRow() < 2) return out;
+  g.getRange(2, 1, g.getLastRow() - 1, 1).getValues().forEach(function (r) {
+    var t = ms_(r[0]); if (t == null) return;
+    var d = new Date(t), key = d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+    out[key] = (out[key] || 0) + 1;
+  });
+  return out;
+}
+function writeGoal_(ss, device, at, n) {
+  var g = ss.getSheetByName(GOAL_SHEET);
+  if (!g) { g = ss.insertSheet(GOAL_SHEET); g.appendRow(['日時', '端末', '問題数']); }
+  var t = Number(at) || Date.now();
+  g.appendRow([new Date(Math.min(t, Date.now() + FUTURE_LIMIT_MS)), device, num_(n)]);
 }
 
 /* 学習回数 ＝ 元の回数 ＋ 各端末の回数。rest は「この端末以外」の合計 */
@@ -327,6 +345,9 @@ function push_(ops, device) {
           id = 0; // 1.0 の版が残した送信待ち。絞り込みは端末ごとになったので何もしない
         } else if (op.type === 'count') {
           writeCount_(ss, device, dt.own);
+          id = 0;
+        } else if (op.type === 'goal') {
+          writeGoal_(ss, device, dt.at, dt.n);
           id = 0;
         } else if (op.type === 'save' && id < 0) {
           var ts0 = nextTs_();
